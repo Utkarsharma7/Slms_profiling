@@ -1,0 +1,7 @@
+benchmark_model
+*.tflite
+results/*.json
+results/*.csv
+__pycache__/
+.venv/
+venv/
