@@ -1,0 +1,4 @@
+# Place benchmark binaries here:
+# - onnxruntime_perf_test  (for .onnx models)
+# - speed_benchmark_torch  (for .pt / .ptl models)
+# TFLite uses the APK (no binary needed here).

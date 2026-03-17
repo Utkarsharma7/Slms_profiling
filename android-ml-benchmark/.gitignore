@@ -1,7 +1,13 @@
-benchmark_model
 *.tflite
+*.onnx
+*.pt
+*.ptl
+*.gguf
 results/*.json
 results/*.csv
 __pycache__/
 .venv/
 venv/
+binaries/onnxruntime_perf_test
+binaries/speed_benchmark_torch
+binaries/llama-bench
