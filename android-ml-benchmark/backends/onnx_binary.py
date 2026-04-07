@@ -27,6 +27,8 @@ from backends.base import BackendBase, DEVICE_TMP
 SCRIPT_DIR = Path(__file__).resolve().parent.parent
 BINARY_NAME = "onnxruntime_perf_test"
 DEVICE_BINARY = f"{DEVICE_TMP}/{BINARY_NAME}"
+SHARED_LIB = "libonnxruntime.so"
+DEVICE_SHARED_LIB = f"{DEVICE_TMP}/{SHARED_LIB}"
 
 ONNX_EXECUTION_PROVIDERS = ("cpu", "nnapi", "xnnpack")
 
@@ -45,6 +47,9 @@ class ONNXRuntimeBackend(BackendBase):
     def _local_binary(self) -> Path:
         return SCRIPT_DIR / "binaries" / BINARY_NAME
 
+    def _local_shared_lib(self) -> Path:
+        return SCRIPT_DIR / "binaries" / SHARED_LIB
+
     def is_available(self) -> bool:
         return self._local_binary().is_file()
 
@@ -60,33 +65,64 @@ class ONNXRuntimeBackend(BackendBase):
             return result
 
         device_model = f"{DEVICE_TMP}/{model_path.name}"
+        # Fresh run: remove any leftovers
+        self.rm(DEVICE_BINARY)
+        self.rm(DEVICE_SHARED_LIB)
+        self.rm(device_model)
+
         self.push(self._local_binary(), DEVICE_BINARY)
         self.shell_cmd(f"chmod 755 {DEVICE_BINARY}", timeout=10)
+
+        # onnxruntime_perf_test is dynamically linked to libonnxruntime.so
+        if self._local_shared_lib().is_file():
+            self.push(self._local_shared_lib(), DEVICE_SHARED_LIB)
+        else:
+            result["error"] = (
+                f"Missing {SHARED_LIB} next to onnxruntime_perf_test in binaries/. "
+                f"Expected at {self._local_shared_lib()}."
+            )
+            return result
+
         self.push(model_path, device_model)
 
         ep_flag = self._ep_flag()
+        # NOTE: onnxruntime_perf_test expects model path as a positional argument.
+        # -m is "test mode" (duration/times), not "model".
         cmd = (
-            f"{DEVICE_BINARY} "
-            f"-m {device_model} "
-            f"-r 50 "
+            f"LD_LIBRARY_PATH={DEVICE_TMP} {DEVICE_BINARY} "
             f"-e {ep_flag} "
-            f"-x {self.num_threads}"
+            f"-x {self.num_threads} "
+            f"-m times "
+            f"-r 50 "
+            f"-S 1 "
+            f"-I "
+            f"{device_model}"
         )
-        if self.op_profiling:
-            cmd += " -o 1"
 
-        output = self.shell_cmd(cmd, timeout=int(self.wait_seconds + 60))
+        output = self.shell_cmd(cmd, timeout=int(self.wait_seconds + 120))
         result.update(self._parse(output))
 
-        if self.op_profiling:
-            ops = self._parse_op_profile(output)
-            if ops:
-                result["op_profile"] = ops
-                result["top_ops"] = ops[:5]
+        # extra perf_test metrics
+        m_ips = re.search(r"Number of inferences per second:\s*([\d.]+)", output, re.IGNORECASE)
+        if m_ips:
+            result["throughput_per_sec"] = round(float(m_ips.group(1)), 3)
+        m_cpu = re.search(r"Avg CPU usage:\s*([\d.]+)\s*%", output, re.IGNORECASE)
+        if m_cpu:
+            result["cpu_usage_avg_pct"] = round(float(m_cpu.group(1)), 1)
+        m_peak = re.search(r"Peak working set size:\s*(\d+)\s*bytes", output, re.IGNORECASE)
+        if m_peak:
+            result["peak_working_set_bytes"] = int(m_peak.group(1))
+
+        # per-op profiling isn't stable/standardized for perf_test output; keep it off by default
 
         if not result.get("inference_avg_ms") and not result.get("error"):
             result["error"] = "Could not parse ONNX benchmark output"
-            result["raw_output"] = output[:800]
+            result["raw_output"] = output[:2000]
+
+        # Clean up device (always try, even if parse failed)
+        self.rm(device_model)
+        self.rm(DEVICE_BINARY)
+        self.rm(DEVICE_SHARED_LIB)
         return result
 
     def _ep_flag(self) -> str:
@@ -102,20 +138,25 @@ class ONNXRuntimeBackend(BackendBase):
     def _parse(output: str) -> dict:
         parsed = {}
 
-        # "Average inference time cost: 12.345 ms" (common ORT format)
+        # "Average inference time cost total: 27.05 ms" (common perf_test format)
         m = re.search(
-            r"(?:Average\s+(?:inference\s+)?time\s*(?:cost)?|Avg\s+latency|average)[:\s]+([\d.]+)\s*ms",
+            r"(?:Average\s+(?:inference\s+)?time\s*(?:cost)?(?:\s*total)?|"
+            r"Average\s+inference\s+time\s+cost\s+total|"
+            r"Avg\s+latency|average)[:\s]+([\d.]+)\s*ms",
             output, re.IGNORECASE,
         )
         if m:
             parsed["inference_avg_ms"] = round(float(m.group(1)), 3)
             parsed["inference_avg_us"] = round(float(m.group(1)) * 1000, 1)
 
-        # Percentile latencies: "P50 latency (ms): 12.34"
+        # Percentile latencies can be in seconds: "P50 Latency: 0.027 s"
         for pct in ("50", "90", "95", "99"):
-            pm = re.search(rf"P{pct}\s*(?:latency)?\s*\(?ms\)?[:\s]+([\d.]+)", output, re.IGNORECASE)
-            if pm:
-                parsed[f"p{pct}_ms"] = round(float(pm.group(1)), 3)
+            pm_ms = re.search(rf"P{pct}\s*(?:Latency|latency)?[:\s]+([\d.]+)\s*ms", output, re.IGNORECASE)
+            pm_s = re.search(rf"P{pct}\s*(?:Latency|latency)?[:\s]+([\d.]+)\s*s", output, re.IGNORECASE)
+            if pm_ms:
+                parsed[f"p{pct}_ms"] = round(float(pm_ms.group(1)), 3)
+            elif pm_s:
+                parsed[f"p{pct}_ms"] = round(float(pm_s.group(1)) * 1000.0, 3)
 
         # "Total time: 617.25 ms"
         m2 = re.search(r"Total time[:\s]+([\d.]+)\s*ms", output, re.IGNORECASE)
@@ -130,13 +171,17 @@ class ONNXRuntimeBackend(BackendBase):
                 parsed["inference_avg_ms"] = round(total / iters, 3)
                 parsed["inference_avg_us"] = round(parsed["inference_avg_ms"] * 1000, 1)
 
-        # Init time: "Session creation time cost: 123.45 ms" or "Init time: 123 ms"
+        # Init time: "Session creation time cost: 0.034 s" or "... 123.45 ms"
         m_init = re.search(
-            r"(?:Session creation time cost|Init time|Initialization)[:\s]+([\d.]+)\s*ms",
+            r"(?:Session creation time cost|Init time|Initialization)[:\s]+([\d.]+)\s*(ms|s)",
             output, re.IGNORECASE,
         )
         if m_init:
-            parsed["init_ms"] = round(float(m_init.group(1)), 2)
+            val = float(m_init.group(1))
+            unit = m_init.group(2).lower()
+            if unit == "s":
+                val *= 1000.0
+            parsed["init_ms"] = round(val, 2)
 
         # First run: "First inference time cost: 45.67 ms"
         m_first = re.search(
@@ -157,7 +202,7 @@ class ONNXRuntimeBackend(BackendBase):
         if m_warm:
             parsed["warmup_avg_us"] = round(float(m_warm.group(1)) * 1000, 1)
 
-        # Memory: "Peak working set size: 123456789 bytes" or "peak memory: 123 MB"
+        # Memory: "Peak working set size: 66596864 bytes"
         m4 = re.search(
             r"(?:peak\s*(?:working set|memory)\s*(?:size)?|total\s*memory)[:\s]+([\d.]+)\s*(bytes|KB|MB|GB)?",
             output, re.IGNORECASE,

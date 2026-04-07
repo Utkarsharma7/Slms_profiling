@@ -87,7 +87,6 @@ android-ml-benchmark/
 ├── download_models.py        # Download TFLite + ONNX + GGUF models
 ├── report.py                 # Comparison table + CSV + bottleneck analysis
 ├── system_profiler.py        # Poll CPU/GPU/thermal metrics during benchmarks
-├── run_tf_apk_benchmark.py   # Legacy: TFLite-only script
 ├── adb_interface.py          # ADB helpers
 ├── backends/
 │   ├── __init__.py           # Format → backend routing

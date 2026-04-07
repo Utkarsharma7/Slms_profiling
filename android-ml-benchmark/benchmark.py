@@ -19,7 +19,6 @@ from adb_interface import get_connected_devices
 from backends import get_backend_for_model, BACKENDS
 from backends.tflite_apk import TFLiteAPKBackend, DELEGATES as TFLITE_DELEGATES
 from backends.onnx_binary import ONNXRuntimeBackend, ONNX_EXECUTION_PROVIDERS
-from backends.pytorch_binary import PyTorchMobileBackend
 from backends.llamacpp_binary import LlamaCppBackend
 from system_profiler import SystemProfiler
 from device_info import get_device_info, get_recommended_settings, print_device_info
@@ -27,6 +26,50 @@ from device_info import get_device_info, get_recommended_settings, print_device_
 MODELS_DIR = SCRIPT_DIR / "models"
 RESULTS_DIR = SCRIPT_DIR / "results"
 SUPPORTED_EXTENSIONS = tuple(BACKENDS.keys())
+
+
+def _model_size_fields(model_path: Path) -> dict:
+    try:
+        size_bytes = model_path.stat().st_size
+    except OSError:
+        return {"model_size_bytes": None, "model_size_mb": None}
+    return {
+        "model_size_bytes": int(size_bytes),
+        "model_size_mb": round(size_bytes / (1024 * 1024), 2),
+    }
+
+
+def _save_results(out_path: Path, dev_info: dict | None, rec: dict | None, results: list[dict]) -> None:
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 1) Device-only JSON (stable, clean)
+    device_only_path = RESULTS_DIR / "device_info.json"
+    with open(device_only_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"device_info": dev_info, "recommendations": rec},
+            f,
+            indent=2,
+            default=str,
+        )
+
+    # 2) Results-only JSON (what you asked to display/share)
+    results_only_path = RESULTS_DIR / "inference_results.json"
+    with open(results_only_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {"results": results},
+            f,
+            indent=2,
+            default=str,
+        )
+
+    # 3) Combined JSON (backwards-compatible with report.py + existing workflow)
+    output_data = {
+        "device_info": dev_info,
+        "recommendations": rec,
+        "results": results,
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(output_data, f, indent=2, default=str)
 
 
 def scan_models(models_dir: Path) -> list[Path]:
@@ -114,13 +157,11 @@ def check_backends():
     """Print which backends are available."""
     tfl = TFLiteAPKBackend()
     onnx = ONNXRuntimeBackend()
-    pt = PyTorchMobileBackend()
     lc = LlamaCppBackend()
     print("Backend availability:")
     print(f"  TFLite APK (.tflite):          {'YES' if tfl.is_available() else 'NO  (adb install -r -d benchmark.apk)'}")
     print(f"  llama.cpp (.gguf):             {'YES' if lc.is_available() else 'NO  (put llama-bench in binaries/)'}")
     print(f"  ONNX Runtime (.onnx):          {'YES' if onnx.is_available() else 'NO  (put onnxruntime_perf_test in binaries/)'}")
-    print(f"  PyTorch Mobile (.pt, .ptl):    {'YES' if pt.is_available() else 'NO  (put speed_benchmark_torch in binaries/)'}")
     print()
 
 
@@ -139,13 +180,6 @@ def make_backend(backend_cls, args, delegate="cpu"):
             wait_seconds=args.wait,
             execution_provider=delegate,
             op_profiling=not args.no_op_profiling,
-        )
-    elif backend_cls == PyTorchMobileBackend:
-        return backend_cls(
-            num_threads=args.threads,
-            wait_seconds=args.wait,
-            input_dims=args.input_dims,
-            input_type=args.input_type,
         )
     else:
         return backend_cls(
@@ -169,7 +203,7 @@ def get_delegates_for_backend(backend_cls, delegate_arg: str) -> list[str]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Benchmark ML models (.tflite, .onnx, .pt, .ptl, .gguf) on any Android device over USB.",
+        description="Benchmark ML models (.tflite, .onnx, .gguf) on any Android device over USB.",
     )
     parser.add_argument("model", type=Path, nargs="?", default=None,
                         help="Path to one model. Omit to use --all or first model in models/")
@@ -189,11 +223,6 @@ def main():
                         help="Delegate/EP: cpu, gpu, nnapi, xnnpack, or all (runs all per-backend)")
     parser.add_argument("--no-op-profiling", action="store_true",
                         help="Disable per-operator profiling for TFLite/ONNX")
-    # PyTorch-specific
-    parser.add_argument("--input-dims", type=str, default="1,3,224,224",
-                        help="Input dimensions for PyTorch models (default: 1,3,224,224)")
-    parser.add_argument("--input-type", type=str, default="float",
-                        help="Input type for PyTorch models (default: float)")
     # System profiling
     parser.add_argument("--profile", action="store_true",
                         help="Collect system metrics (CPU freq, temp, memory) during each benchmark")
@@ -258,67 +287,74 @@ def main():
     check_backends()
 
     all_results = []
-    step = 0
-    total = len(model_paths)
-    for i, mp in enumerate(model_paths):
-        if not mp.is_file():
-            print(f"[{i+1}/{total}] SKIP: {mp} (not found)")
-            continue
-
-        try:
-            backend_cls = get_backend_for_model(mp)
-        except ValueError as e:
-            print(f"[{i+1}/{total}] SKIP: {mp.name} ({e})")
-            continue
-
-        delegates_to_run = get_delegates_for_backend(backend_cls, args.delegate)
-
-        for delegate in delegates_to_run:
-            step += 1
-            backend = make_backend(backend_cls, args, delegate=delegate)
-            has_delegate = backend_cls in (TFLiteAPKBackend, ONNXRuntimeBackend)
-            label = f"{mp.name}" + (f" ({delegate.upper()})" if has_delegate else "")
-            print(f"\n[{step}] {label}  ->  {backend.name()}")
-
-            if not backend.is_available():
-                result = backend._empty_result(mp)
-                result["error"] = f"Backend '{backend.name()}' not available. See --check."
-                all_results.append(result)
-                print_result(result)
-                continue
-
-            profiler = None
-            if args.profile:
-                profiler = SystemProfiler(interval=args.profile_interval)
-                profiler.start()
-
-            result = backend.run(mp)
-
-            if profiler:
-                profiler.stop()
-                result["system_profile"] = profiler.get_summary()
-
-            # Attach device info to each result for report.py
-            if dev_info:
-                result["device"] = f"{dev_info.get('brand','')} {dev_info.get('model','')}"
-                result["soc"] = dev_info.get("soc", "")
-
-            all_results.append(result)
-            print_result(result)
-
-    print_summary_table(all_results)
-
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = args.output or RESULTS_DIR / "benchmark_results.json"
+    step = 0
+    total = len(model_paths)
+    try:
+        for i, mp in enumerate(model_paths):
+            if not mp.is_file():
+                print(f"[{i+1}/{total}] SKIP: {mp} (not found)")
+                continue
 
-    # Include device info at top level of the output
-    output_data = {
-        "device_info": dev_info,
-        "recommendations": rec,
-        "results": all_results,
-    }
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(output_data, f, indent=2, default=str)
+            try:
+                backend_cls = get_backend_for_model(mp)
+            except ValueError as e:
+                print(f"[{i+1}/{total}] SKIP: {mp.name} ({e})")
+                continue
+
+            delegates_to_run = get_delegates_for_backend(backend_cls, args.delegate)
+
+            for delegate in delegates_to_run:
+                step += 1
+                backend = make_backend(backend_cls, args, delegate=delegate)
+                has_delegate = backend_cls in (TFLiteAPKBackend, ONNXRuntimeBackend)
+                label = f"{mp.name}" + (f" ({delegate.upper()})" if has_delegate else "")
+                print(f"\n[{step}] {label}  ->  {backend.name()}")
+
+                if not backend.is_available():
+                    result = backend._empty_result(mp)
+                    result.update(_model_size_fields(mp))
+                    result["error"] = f"Backend '{backend.name()}' not available. See --check."
+                    all_results.append(result)
+                    print_result(result)
+                    _save_results(out_path, dev_info, rec, all_results)
+                    continue
+
+                profiler = None
+                try:
+                    if args.profile:
+                        profiler = SystemProfiler(interval=args.profile_interval)
+                        profiler.start()
+
+                    result = backend.run(mp)
+                    # attach model size info (always, for all formats)
+                    result.update(_model_size_fields(mp))
+
+                    if profiler:
+                        profiler.stop()
+                        result["system_profile"] = profiler.get_summary()
+                finally:
+                    if profiler:
+                        try:
+                            profiler.stop()
+                        except Exception:
+                            pass
+
+                # Attach device info to each result for report.py
+                if dev_info:
+                    result["device"] = f"{dev_info.get('brand','')} {dev_info.get('model','')}"
+                    result["soc"] = dev_info.get("soc", "")
+
+                all_results.append(result)
+                print_result(result)
+                # Incremental save so partial runs persist even on Ctrl+C
+                _save_results(out_path, dev_info, rec, all_results)
+    except KeyboardInterrupt:
+        print("\nInterrupted. Saving partial results...")
+        _save_results(out_path, dev_info, rec, all_results)
+
+    print_summary_table(all_results)
     print(f"Results saved to: {out_path}")
     return 0
 

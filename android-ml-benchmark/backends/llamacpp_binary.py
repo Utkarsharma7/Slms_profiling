@@ -45,6 +45,10 @@ class LlamaCppBackend(BackendBase):
             return result
 
         device_model = f"{DEVICE_TMP}/{model_path.name}"
+        # Fresh run: remove any leftovers
+        self.rm(DEVICE_BINARY)
+        self.rm(device_model)
+
         self.push(self._local_binary(), DEVICE_BINARY)
         self.shell_cmd(f"chmod 755 {DEVICE_BINARY}", timeout=10)
         self.push(model_path, device_model)
@@ -60,6 +64,10 @@ class LlamaCppBackend(BackendBase):
         if not result.get("prompt_tokens_per_sec") and not result.get("generation_tokens_per_sec") and not result.get("error"):
             result["error"] = "Could not parse llama-bench output"
             result["raw_output"] = output[:800]
+
+        # Clean up device
+        self.rm(device_model)
+        self.rm(DEVICE_BINARY)
         return result
 
     def _empty_result(self, model_path: Path) -> dict:
@@ -91,19 +99,35 @@ class LlamaCppBackend(BackendBase):
                 continue
             try:
                 test_name = cols[-2].strip()
-                speed = float(cols[-1].strip())
+                # Speed cell can look like: "28.58 ± 1.25" (sometimes mojibake "Â±")
+                speed_cell = cols[-1].replace("Â±", "±")
+                speed_str = speed_cell.split("±", 1)[0].strip()
+                speed = float(speed_str)
                 if test_name.startswith("pp"):
                     pp_speeds.append(speed)
                 elif test_name.startswith("tg"):
                     tg_speeds.append(speed)
                 # Extract model size and params from first row
                 if not parsed.get("model_size_gib"):
-                    size_m = re.search(r"([\d.]+)\s*GiB", cols[1] if len(cols) > 1 else "")
-                    if size_m:
-                        parsed["model_size_gib"] = float(size_m.group(1))
-                    param_m = re.search(r"([\d.]+)\s*B", cols[2] if len(cols) > 2 else "")
-                    if param_m:
-                        parsed["params_b"] = float(param_m.group(1))
+                    size_cell = cols[1] if len(cols) > 1 else ""
+                    size_gib = None
+                    m_gib = re.search(r"([\d.]+)\s*GiB", size_cell, re.IGNORECASE)
+                    m_mib = re.search(r"([\d.]+)\s*MiB", size_cell, re.IGNORECASE)
+                    if m_gib:
+                        size_gib = float(m_gib.group(1))
+                    elif m_mib:
+                        size_gib = float(m_mib.group(1)) / 1024.0
+                    if size_gib is not None:
+                        parsed["model_size_gib"] = round(size_gib, 3)
+
+                    params_cell = cols[2] if len(cols) > 2 else ""
+                    # "361.82 M" or "1.10 B"
+                    m_b = re.search(r"([\d.]+)\s*B", params_cell, re.IGNORECASE)
+                    m_m = re.search(r"([\d.]+)\s*M", params_cell, re.IGNORECASE)
+                    if m_b:
+                        parsed["params_b"] = float(m_b.group(1))
+                    elif m_m:
+                        parsed["params_b"] = round(float(m_m.group(1)) / 1000.0, 3)
             except (ValueError, IndexError):
                 continue
 

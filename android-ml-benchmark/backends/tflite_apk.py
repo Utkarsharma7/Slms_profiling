@@ -37,6 +37,8 @@ class TFLiteAPKBackend(BackendBase):
         device_model = f"{DEVICE_TMP}/model.tflite"
 
         self.clear_logcat()
+        # Ensure fresh run (remove previous pushed model)
+        self.rm(device_model)
         self.push(model_path, device_model)
 
         args_str = f"--graph={device_model} --num_threads={self.num_threads}"
@@ -55,6 +57,8 @@ class TFLiteAPKBackend(BackendBase):
 
         log = self.get_logcat("tflite")
         result.update(self._parse(log))
+        # Clean up device
+        self.rm(device_model)
         return result
 
     @staticmethod

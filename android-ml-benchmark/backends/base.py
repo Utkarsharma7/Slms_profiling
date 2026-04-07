@@ -73,7 +73,10 @@ class BackendBase(ABC):
 
     @staticmethod
     def push(local_path: Path, device_path: str):
-        run_adb("push", str(local_path), device_path, timeout=120)
+        # Scale adb push timeout for large model files (GGUF can be hundreds of MB).
+        size_mb = local_path.stat().st_size / (1024 * 1024)
+        timeout = max(120, int(size_mb / 2) + 60)  # ~2 MB/s + 60s buffer
+        run_adb("push", str(local_path), device_path, timeout=timeout)
 
     @staticmethod
     def shell_cmd(cmd: str, timeout: int = 180) -> str:
@@ -82,3 +85,11 @@ class BackendBase(ABC):
             return (r.stdout or "") + (r.stderr or "")
         except ADBError as e:
             return str(e)
+
+    @staticmethod
+    def rm(device_path: str):
+        """Best-effort remove a file from the device."""
+        try:
+            run_adb("shell", f"rm -f {device_path}", check=False, timeout=10)
+        except ADBError:
+            pass
