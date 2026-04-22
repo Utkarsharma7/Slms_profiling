@@ -78,7 +78,7 @@ def get_device(serial: Optional[str] = None) -> Optional[str]:
 
 
 def push_file(local_path: Path, device_path: str, serial: Optional[str] = None) -> None:
-    """Push a file to the device. device_path is the full path on the device (e.g. /data/local/tmp/model.tflite)."""
+    """Push a file to the device. device_path is the full path on the device (e.g. /data/local/tmp/model.gguf)."""
     device = get_device(serial)
     if not device:
         raise NoDeviceError("No Android device connected. Connect via USB and enable USB debugging.")

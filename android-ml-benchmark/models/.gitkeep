@@ -1,1 +1,1 @@
-# Place .tflite (and optionally .onnx) model files here.
+# Place your GGUF model files here (.gguf).

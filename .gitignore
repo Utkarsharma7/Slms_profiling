@@ -1,0 +1,28 @@
+## Repo-wide ignores (this repo is a llama.cpp Android profiler harness)
+
+# Build outputs
+profiler/build-android/
+profiler/**/CMakeFiles/
+profiler/**/CMakeCache.txt
+profiler/**/build.ninja
+profiler/**/.ninja_deps
+profiler/**/.ninja_log
+profiler/**/cmake_install.cmake
+profiler/**/compile_commands.json
+profiler/**/_deps/
+profiler/**/third_party/
+
+# Python caches / venvs
+**/__pycache__/
+**/*.pyc
+.venv/
+venv/
+
+# Runtime artifacts (models/binaries/results are machine-local)
+android-ml-benchmark/models/
+android-ml-benchmark/binaries/
+android-ml-benchmark/results/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db

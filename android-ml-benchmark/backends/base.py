@@ -64,7 +64,7 @@ class BackendBase(ABC):
             pass
 
     @staticmethod
-    def get_logcat(tag: str = "tflite") -> str:
+    def get_logcat(tag: str = "llama") -> str:
         try:
             r = run_adb("logcat", "-d", "-s", f"{tag}:I", check=False, timeout=15)
             return (r.stdout or "") + (r.stderr or "")

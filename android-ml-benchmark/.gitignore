@@ -1,13 +1,6 @@
-*.tflite
-*.onnx
-*.pt
-*.ptl
 *.gguf
-results/*.json
-results/*.csv
+results/
 __pycache__/
 .venv/
 venv/
-binaries/onnxruntime_perf_test
-binaries/speed_benchmark_torch
-binaries/llama-bench
+binaries/llama-phase-profiler
